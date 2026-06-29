@@ -6,6 +6,7 @@
 //! 3. **Ask AI** — on-demand LLM Q&A (feature-gated, only with `--features ai`).
 
 mod ui;
+mod tray;
 
 use eframe::egui;
 

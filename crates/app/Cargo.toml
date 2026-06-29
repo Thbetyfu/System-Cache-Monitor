@@ -17,6 +17,8 @@ log = { workspace = true }
 env_logger = { workspace = true }
 serde_json = { workspace = true }
 jiff = { workspace = true }
+tray-icon = "0.19"
+notify-rust = "4"
 
 # The LLM crate is optional and pulls in a large C++ build (llama.cpp).
 # Enable with: cargo build --release --features ai

@@ -10,6 +10,7 @@ use ca_core::{
 use eframe::egui::{self, Color32, RichText};
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
+use crate::tray::init_tray;
 
 /// Which tab is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +60,13 @@ pub struct App {
     scan_rx: Option<Receiver<Vec<ScanResult>>>,
     last_scan_time: Option<std::time::Instant>,
 
+    // System Tray & Notifications
+    #[allow(dead_code)]
+    tray_icon: Option<tray_icon::TrayIcon>,
+    show_window: bool,
+    allow_close: bool,
+    scheduled_scanning: bool,
+
     // Clean state
     cleaning_name: Option<String>,
     clean_confirming: bool,
@@ -106,6 +114,10 @@ impl App {
             scanning: false,
             scan_rx: None,
             last_scan_time: Some(std::time::Instant::now()),
+            tray_icon: init_tray().ok(),
+            show_window: true,
+            allow_close: false,
+            scheduled_scanning: false,
             cleaning_name: None,
             clean_confirming: false,
             last_clean: None,
@@ -168,6 +180,18 @@ impl App {
                     .trim_end_matches('\\')
                     .into();
                 self.archive_plan = ArchivePlan::suggest(&self.results, &self.scores, &ext);
+
+                // Trigger Windows Toast Notification
+                let body = if self.scheduled_scanning {
+                    "Periodic background scan completed successfully."
+                } else {
+                    "Scan completed."
+                };
+                let _ = notify_rust::Notification::new()
+                    .summary("Cache Advisor")
+                    .body(body)
+                    .show();
+                self.scheduled_scanning = false;
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {}
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -192,8 +216,41 @@ impl eframe::App for App {
             let last = self.last_scan_time.unwrap_or_else(std::time::Instant::now);
             if std::time::Instant::now().duration_since(last) >= std::time::Duration::from_secs(self.settings.scheduler.interval_mins as u64 * 60) {
                 log::info!("Triggering scheduled periodic scan...");
+                self.scheduled_scanning = true;
                 self.start_scan(ctx);
             }
+        }
+
+        // Intercept close button to minimize to tray
+        if ctx.input(|i| i.viewport().close_requested()) {
+            if !self.allow_close {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.show_window = false;
+            }
+        }
+
+        // Poll System Tray menu events
+        if let Ok(event) = tray_icon::menu::MenuEvent::receiver().try_recv() {
+            log::info!("System Tray menu event: {:?}", event);
+            if event.id.0 == "show_app" {
+                self.show_window = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            } else if event.id.0 == "quit_app" {
+                self.allow_close = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+
+        // Poll System Tray icon events (clicks)
+        if let Ok(_event) = tray_icon::TrayIconEvent::receiver().try_recv() {
+            self.show_window = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        }
+
+        // Handle minimize to tray flag
+        if !self.show_window {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            self.show_window = true;
         }
 
         // Track tab transitions
@@ -476,7 +533,17 @@ impl App {
                 ui.horizontal(|ui| {
                     if ui.button(RichText::new("✅ Yes, Clean").color(Color32::GREEN)).clicked() {
                         match clean_folder(&path) {
-                            Ok(out) => self.last_clean = Some(out),
+                            Ok(out) => {
+                                self.last_clean = Some(out.clone());
+                                // Trigger Toast Notification
+                                let _ = notify_rust::Notification::new()
+                                    .summary("Cache Advisor")
+                                    .body(&format!(
+                                        "Cleaned: freed {}",
+                                        format_bytes(out.freed_bytes)
+                                    ))
+                                    .show();
+                            }
                             Err(e) => log::error!("Clean failed: {}", e),
                         }
                         self.clean_confirming = false;
@@ -576,6 +643,14 @@ impl App {
                                 format_bytes(out.bytes_moved),
                                 out.skipped
                             ));
+                            // Trigger Toast Notification
+                            let _ = notify_rust::Notification::new()
+                                .summary("Cache Advisor")
+                                .body(&format!(
+                                    "Archiving completed. Moved {}",
+                                    format_bytes(out.bytes_moved)
+                                ))
+                                .show();
                         }
                         Err(e) => {
                             self.archive_error = Some(format!("Archive error: {e}"));
