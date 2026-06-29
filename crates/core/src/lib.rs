@@ -9,6 +9,7 @@ pub mod classifier;
 pub mod archive;
 pub mod settings;
 pub mod duplicates;
+pub mod disk_map;
 
 pub use rules::{FolderRule, RuleSet, CleaningTier};
 pub use scanner::{scan_folder, FolderStats, ScanResult};
@@ -16,3 +17,4 @@ pub use classifier::{RiskScore, classify, RiskLevel};
 pub use archive::{ArchivePlan, ArchiveEntry};
 pub use settings::Settings;
 pub use duplicates::{find_duplicates, DuplicateGroup};
+pub use disk_map::{scan_drive, DiskNode};

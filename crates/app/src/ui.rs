@@ -18,6 +18,7 @@ enum Tab {
     Scan,
     Archive,
     Duplicates,
+    DiskMap,
     #[cfg(feature = "ai")]
     AskAi,
 }
@@ -85,6 +86,14 @@ pub struct App {
     dup_scanning: bool,
     dup_rx: Option<Receiver<Vec<ca_core::DuplicateGroup>>>,
 
+    // Disk Map state
+    disk_scan_drive: String,
+    disk_scan_active: bool,
+    disk_scan_rx: Option<Receiver<Option<ca_core::DiskNode>>>,
+    disk_tree_root: Option<ca_core::DiskNode>,
+    disk_tree_active: Option<ca_core::DiskNode>,
+    disk_history: Vec<ca_core::DiskNode>,
+
     // AI state (feature-gated)
     #[cfg(feature = "ai")]
     ai_worker: Option<AiWorker>,
@@ -129,6 +138,13 @@ impl App {
             duplicate_groups: Vec::new(),
             dup_scanning: false,
             dup_rx: None,
+
+            disk_scan_drive: "C:\\".into(),
+            disk_scan_active: false,
+            disk_scan_rx: None,
+            disk_tree_root: None,
+            disk_tree_active: None,
+            disk_history: Vec::new(),
 
             #[cfg(feature = "ai")]
             ai_worker: None,
@@ -207,6 +223,7 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_scan();
         self.poll_duplicates();
+        self.poll_disk_scan();
 
         #[cfg(feature = "ai")]
         self.poll_ai();
@@ -304,6 +321,7 @@ impl eframe::App for App {
                 ui.selectable_value(&mut self.selected_tab, Tab::Scan, "📊 Scan");
                 ui.selectable_value(&mut self.selected_tab, Tab::Archive, "📦 Archive");
                 ui.selectable_value(&mut self.selected_tab, Tab::Duplicates, "🔍 Duplicates");
+                ui.selectable_value(&mut self.selected_tab, Tab::DiskMap, "🗺 Disk Map");
                 #[cfg(feature = "ai")]
                 ui.selectable_value(&mut self.selected_tab, Tab::AskAi, "🤖 Ask AI");
             });
@@ -320,6 +338,7 @@ impl eframe::App for App {
                 Tab::Scan => self.panel_scan(ui, ctx),
                 Tab::Archive => self.panel_archive(ui),
                 Tab::Duplicates => self.panel_duplicates(ui),
+                Tab::DiskMap => self.panel_disk_map(ui, ctx),
                 #[cfg(feature = "ai")]
                 Tab::AskAi => self.panel_ask_ai(ui, ctx),
             }
@@ -1085,4 +1104,274 @@ impl App {
 
         Ok(())
     }
+
+    /// Poll the background disk drive scan thread.
+    fn poll_disk_scan(&mut self) {
+        let rx = match &self.disk_scan_rx {
+            Some(r) => r,
+            None => return,
+        };
+        match rx.try_recv() {
+            Ok(result) => {
+                if let Some(root) = result {
+                    self.disk_tree_root = Some(root.clone());
+                    self.disk_tree_active = Some(root);
+                    self.disk_history.clear();
+                    let _ = notify_rust::Notification::new()
+                        .summary("Cache Advisor")
+                        .body(&format!(
+                            "Disk Map scan for {} completed successfully.",
+                            self.disk_scan_drive
+                        ))
+                        .show();
+                } else {
+                    let _ = notify_rust::Notification::new()
+                        .summary("Cache Advisor")
+                        .body(&format!(
+                            "Disk Map scan for {} failed or returned empty.",
+                            self.disk_scan_drive
+                        ))
+                        .show();
+                }
+                self.disk_scan_active = false;
+                self.disk_scan_rx = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.disk_scan_active = false;
+                self.disk_scan_rx = None;
+            }
+        }
+    }
+
+    /// Spawn a thread to scan a drive for disk map visualization.
+    fn start_disk_scan(&mut self) {
+        let drive = PathBuf::from(&self.disk_scan_drive);
+        self.disk_scan_active = true;
+        self.disk_tree_root = None;
+        self.disk_tree_active = None;
+        self.disk_history.clear();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // Prune at 5 MB
+            let min_bytes = 5 * 1024 * 1024;
+            let res = ca_core::scan_drive(&drive, min_bytes);
+            let _ = tx.send(res);
+        });
+        self.disk_scan_rx = Some(rx);
+    }
+
+    fn panel_disk_map(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let (active_path, active_size, can_go_up) = if let Some(active) = &self.disk_tree_active {
+            (Some(active.path.clone()), Some(active.size), !self.disk_history.is_empty())
+        } else {
+            (None, None, false)
+        };
+
+        ui.vertical(|ui| {
+            // Controls row
+            ui.horizontal(|ui| {
+                ui.label("Drive or Folder Path:");
+                ui.text_edit_singleline(&mut self.disk_scan_drive);
+                
+                if self.disk_scan_active {
+                    ui.add_enabled_ui(false, |ui| {
+                        let _ = ui.button("Scanning...");
+                    });
+                } else {
+                    if ui.button("⟳ Scan").clicked() {
+                        self.start_disk_scan();
+                    }
+                }
+
+                // If zoomed in, show breadcrumbs and "Go Up"
+                if let Some(path) = active_path {
+                    ui.separator();
+                    if ui.add_enabled(can_go_up, egui::Button::new("⬆ Go Up")).clicked() {
+                        if let Some(parent) = self.disk_history.pop() {
+                            self.disk_tree_active = Some(parent);
+                        }
+                    }
+                    ui.label(format!("Location: {}", path.display()));
+                    ui.separator();
+                    if let Some(size) = active_size {
+                        ui.label(format!("Size: {}", format_bytes(size)));
+                    }
+                }
+            });
+
+            ui.add_space(8.0);
+
+            // Display loading or the TreeMap
+            if self.disk_scan_active {
+                ui.centered_and_justified(|ui| {
+                    ui.spinner();
+                    ui.label("Scanning drive in background... Please wait.");
+                });
+            } else if let Some(active_node) = self.disk_tree_active.clone() {
+                let available_size = ui.available_size();
+                if available_size.x > 50.0 && available_size.y > 50.0 {
+                    let (rect, _) = ui.allocate_exact_size(available_size, egui::Sense::hover());
+                    
+                    // Call recursive treemap layout with max depth = 2
+                    let mut items = Vec::new();
+                    layout_treemap(&active_node, rect, 0, 2, &mut items);
+
+                    // Render items
+                    for item in &items {
+                        let response = ui.allocate_rect(item.rect, egui::Sense::click())
+                            .on_hover_text(format!(
+                                "{}\nSize: {}\nType: {}",
+                                item.node.path.display(),
+                                format_bytes(item.node.size),
+                                if item.node.is_dir { "Folder" } else { "File" }
+                            ));
+
+                        if response.double_clicked() && item.node.is_dir {
+                            if let Some(current) = &self.disk_tree_active {
+                                self.disk_history.push(current.clone());
+                            }
+                            self.disk_tree_active = Some(item.node.clone());
+                            ctx.request_repaint();
+                        }
+
+                        let stroke_color = if response.hovered() {
+                            Color32::WHITE
+                        } else {
+                            Color32::from_gray(50)
+                        };
+                        
+                        ui.painter().rect_filled(item.rect, 2.0, item.color);
+                        ui.painter().rect_stroke(item.rect, 2.0, (1.0, stroke_color));
+
+                        if item.rect.width() > 60.0 && item.rect.height() > 20.0 {
+                            let label_text = format!("{} ({})", item.node.name, format_bytes(item.node.size));
+                            let font_id = egui::FontId::proportional(11.0);
+                            let text_color = Color32::WHITE;
+                            
+                            let max_width = item.rect.width() - 8.0;
+                            let galley = ui.painter().layout_no_wrap(label_text, font_id, text_color);
+                            
+                            let text_pos = egui::pos2(
+                                item.rect.min.x + 4.0,
+                                item.rect.min.y + 4.0,
+                            );
+                            
+                            if galley.rect.width() <= max_width {
+                                ui.painter().galley(text_pos, galley, Color32::WHITE);
+                            } else {
+                                let name_galley = ui.painter().layout_no_wrap(item.node.name.clone(), egui::FontId::proportional(11.0), text_color);
+                                if name_galley.rect.width() <= max_width {
+                                    ui.painter().galley(text_pos, name_galley, Color32::WHITE);
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                ui.centered_and_justified(|ui| {
+                    ui.label("Enter a drive path above (e.g. C:\\ or D:\\) and click Scan to visualize disk usage.");
+                });
+            }
+        });
+    }
+}
+
+struct TreeMapItem {
+    rect: egui::Rect,
+    node: ca_core::DiskNode,
+    color: egui::Color32,
+}
+
+fn layout_treemap(
+    node: &ca_core::DiskNode,
+    rect: egui::Rect,
+    depth: u32,
+    max_depth: u32,
+    items: &mut Vec<TreeMapItem>,
+) {
+    if depth >= max_depth || node.children.is_empty() {
+        let color = get_node_color(&node.path, node.is_dir);
+        items.push(TreeMapItem {
+            rect,
+            node: node.clone(),
+            color,
+        });
+        return;
+    }
+
+    let total_size = node.size;
+    if total_size == 0 {
+        return;
+    }
+
+    let horizontal = rect.width() > rect.height();
+    let mut current_offset = if horizontal { rect.min.x } else { rect.min.y };
+    let rect_size = if horizontal { rect.width() } else { rect.height() };
+
+    for child in &node.children {
+        let ratio = child.size as f32 / total_size as f32;
+        let slice_size = rect_size * ratio;
+        if slice_size < 1.0 {
+            continue;
+        }
+
+        let child_rect = if horizontal {
+            egui::Rect::from_min_max(
+                egui::pos2(current_offset, rect.min.y),
+                egui::pos2(current_offset + slice_size, rect.max.y),
+            )
+        } else {
+            egui::Rect::from_min_max(
+                egui::pos2(rect.min.x, current_offset),
+                egui::pos2(rect.max.x, current_offset + slice_size),
+            )
+        };
+
+        layout_treemap(child, child_rect, depth + 1, max_depth, items);
+        current_offset += slice_size;
+    }
+}
+
+fn get_node_color(path: &std::path::Path, is_dir: bool) -> egui::Color32 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+    let hash = hasher.finish();
+
+    let hue = (hash % 360) as f32;
+    if is_dir {
+        hsl_to_color32(hue, 0.45, 0.35)
+    } else {
+        hsl_to_color32((hue + 120.0) % 360.0, 0.55, 0.45)
+    }
+}
+
+fn hsl_to_color32(h: f32, s: f32, l: f32) -> egui::Color32 {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+    let m = l - c / 2.0;
+
+    let (r, g, b) = if h < 60.0 {
+        (c, x, 0.0)
+    } else if h < 120.0 {
+        (x, c, 0.0)
+    } else if h < 180.0 {
+        (0.0, c, x)
+    } else if h < 240.0 {
+        (0.0, x, c)
+    } else if h < 300.0 {
+        (x, 0.0, c)
+    } else {
+        (c, 0.0, x)
+    };
+
+    egui::Color32::from_rgb(
+        ((r + m) * 255.0) as u8,
+        ((g + m) * 255.0) as u8,
+        ((b + m) * 255.0) as u8,
+    )
 }
