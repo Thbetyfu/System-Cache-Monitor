@@ -1,0 +1,16 @@
+[package]
+name = "ca-llm"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ca-core = { path = "../core" }
+anyhow = { workspace = true }
+log = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# llama.cpp bindings — tracks upstream closely.
+# First build will download & compile llama.cpp C++ (5-15 min).
+llama-cpp-4 = "0.3.2"
+encoding_rs = "0.8"

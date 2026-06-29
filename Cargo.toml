@@ -1,0 +1,39 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/actions",
+    "crates/app",
+]
+
+# Optional AI crate: built only when --features ai is requested on the app,
+# because it compiles a large C++ backend (llama.cpp) the first time.
+default-members = ["crates/app"]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+authors = ["Cache-Monitor rebuild"]
+license = "MIT"
+
+[workspace.dependencies]
+# Shared deps pinned at workspace level for consistency.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+walkdir = "2"
+rayon = "1"
+sha2 = "0.10"
+sysinfo = "0.32"
+jiff = "0.1"           # datetime for file-age math
+thiserror = "1"
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+
+[profile.release]
+opt-level = "z"     # minimize binary size
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

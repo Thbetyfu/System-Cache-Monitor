@@ -1,0 +1,43 @@
+# Cache Monitor Settings Configuration Example
+# Copy this file to `settings.toml` in the same directory to customize the app.
+
+# Number of days before a file is considered stale (used to calculate risk/urgency score).
+# Default: 90
+stale_days = 90
+
+[llm]
+# Custom path to the local Qwen2 1.5B GGUF model file.
+# If commented out, the default model path is used.
+# model_path = "D:\\MODEL OLLAMA\\blobs\\sha256-405b56374e02b21122ae1469db646be0617c02928fd78e246723ebbb98dbca3e"
+
+[scheduler]
+# Whether to enable periodic background scanning while the app is open.
+# Default: false
+# enabled = false
+# Interval between automatic scans in minutes.
+# Default: 60
+# interval_mins = 60
+
+# To override default monitored folders, define a list of [[folders]] below.
+# Supported tiers: "monitor_only", "cache", "cautious".
+# Placeholders like %TEMP%, %APPDATA%, %LOCALAPPDATA% are supported.
+# You can optionally specify a custom archive destination folder:
+# archive_dest = "F:\\cache-archive\\custom-target"
+
+# [[folders]]
+# name = "User Temp Files"
+# path = "%TEMP%"
+# tier = "cache"
+# note = "Per-user temp; safe to wipe."
+
+# [[folders]]
+# name = "VS Code Workspace"
+# path = "%APPDATA%\\Code\\User\\workspaceStorage"
+# tier = "cache"
+# note = "VS Code workspace storage; safe to wipe."
+
+# [[folders]]
+# name = "Pip Cache (Drive D)"
+# path = "D:\\.pip_cache"
+# tier = "cache"
+# note = "pip download cache; safe to wipe."

@@ -1,0 +1,13 @@
+[package]
+name = "ca-actions"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ca-core = { path = "../core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+walkdir = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
