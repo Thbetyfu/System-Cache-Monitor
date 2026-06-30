@@ -244,6 +244,7 @@ pub struct App {
     ai_response: String,
     #[cfg(feature = "ai")]
     ai_error: Option<String>,
+    show_log_panel: bool,
 }
 
 impl App {
@@ -358,6 +359,7 @@ impl App {
             ai_response: String::new(),
             #[cfg(feature = "ai")]
             ai_error: None,
+            show_log_panel: false,
         }
     }
 
@@ -560,6 +562,50 @@ impl eframe::App for App {
         self.modal_clean(ctx);
         self.modal_lock_warning(ctx);
 
+        // ── Collapsible Console Log Panel ──
+        if self.show_log_panel {
+            egui::TopBottomPanel::bottom("log_console")
+                .resizable(true)
+                .default_height(160.0)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("💻 System Console Log").strong());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("🗑 Clear").clicked() {
+                                if let Ok(mut logs) = ca_core::get_logs().lock() {
+                                    logs.clear();
+                                }
+                            }
+                            if ui.button("❌ Close").clicked() {
+                                self.show_log_panel = false;
+                            }
+                        });
+                    });
+                    ui.add_space(4.0);
+
+                    egui::ScrollArea::vertical()
+                        .max_height(200.0)
+                        .auto_shrink([false, false])
+                        .stick_to_bottom(true)
+                        .show(ui, |ui| {
+                            let logs_guard = ca_core::get_logs().lock();
+                            let mut logs_text = if let Ok(logs) = &logs_guard {
+                                logs.join("\n")
+                            } else {
+                                "Failed to lock logs.".to_string()
+                            };
+                            
+                            ui.add(
+                                egui::TextEdit::multiline(&mut logs_text)
+                                    .font(egui::TextStyle::Monospace)
+                                    .desired_width(f32::INFINITY)
+                                    .desired_rows(8)
+                                    .interactive(true),
+                            );
+                        });
+                });
+        }
+
         // ── Bottom status bar ──
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -583,6 +629,13 @@ impl eframe::App for App {
                     ui.separator();
                     ui.label(RichText::new(err).color(Color32::LIGHT_RED));
                 }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let log_btn_text = if self.show_log_panel { "❌ Hide Logs" } else { "💻 Show Logs" };
+                    if ui.button(log_btn_text).clicked() {
+                        self.show_log_panel = !self.show_log_panel;
+                    }
+                });
             });
         });
 
@@ -1111,7 +1164,18 @@ impl App {
     }
 
     /// Spawn the background AI worker thread and load the GGUF model.
+    ///
+    /// Guards against double-spawn: if a worker is already alive (e.g. the user
+    /// switched tabs very quickly), this is a no-op. The OnceLock in ca_llm
+    /// handles the backend singleton, but avoiding a second thread entirely is
+    /// cleaner and avoids wasted model-load work.
     fn start_ai_worker(&mut self) {
+        // Do not spawn a second worker while one is already running.
+        if self.ai_worker.is_some() {
+            log::warn!("start_ai_worker called while worker already active; ignoring.");
+            return;
+        }
+
         self.ai_loading = true;
         self.ai_error = None;
         self.ai_response.clear();

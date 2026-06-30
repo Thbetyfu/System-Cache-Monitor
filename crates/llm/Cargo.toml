@@ -13,4 +13,5 @@ serde_json = { workspace = true }
 # llama.cpp bindings — tracks upstream closely.
 # First build will download & compile llama.cpp C++ (5-15 min).
 llama-cpp-4 = "0.3.2"
+llama-cpp-sys-4 = "0.3.2"
 encoding_rs = "0.8"

@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 //! Cache-Advisor — agentic storage advisor built in Rust + egui.
 //!
 //! Three panels:
@@ -11,7 +13,7 @@ mod tray;
 use eframe::egui;
 
 fn main() -> eframe::Result<()> {
-    env_logger::init();
+    ca_core::init_logger();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 700.0])

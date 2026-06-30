@@ -3,6 +3,12 @@
 //! The model is loaded on-demand only when the user opens the "Ask AI" panel
 //! and dropped when closed to free RAM. It accepts structured scan context
 //! and returns natural-language suggestions — it NEVER auto-executes actions.
+//!
+//! # Backend Singleton
+//! `LlamaBackend` is a C++ global singleton. Calling `init()` more than once
+//! per process causes a `BackendAlreadyInitialized` panic. We guard against
+//! this with a `OnceLock` so that re-entering the Ask AI tab after leaving it
+//! never triggers a second init.
 
 use anyhow::{Context, Result};
 use llama_cpp_4::{
@@ -12,38 +18,84 @@ use llama_cpp_4::{
     model::{params::LlamaModelParams, AddBos, LlamaModel, Special},
     sampling::LlamaSampler,
 };
-use std::path::Path;
+use std::{path::Path, sync::OnceLock};
+
+/// Process-level singleton for the llama.cpp native backend.
+///
+/// `LlamaBackend::init()` must only be called once per process. Subsequent
+/// calls return `BackendAlreadyInitialized`. We initialise it lazily on the
+/// first `LlmEngine::load()` call and then keep it alive for the rest of the
+/// process lifetime — this is safe because the underlying C++ runtime has the
+/// same lifetime expectation.
+static LLAMA_BACKEND: OnceLock<LlamaBackend> = OnceLock::new();
 
 /// Default GGUF model path: the qwen2:1.5b blob already on disk.
 pub const DEFAULT_MODEL_PATH: &str =
     r"D:\MODEL OLLAMA\blobs\sha256-405b56374e02b21122ae1469db646be0617c02928fd78e246723ebbb98dbca3e";
 
-/// Wraps a loaded llama.cpp model and its backend.
+/// Wraps a loaded llama.cpp model.
 ///
-/// Holds the model in memory. The context is created on-demand during generation
-/// to avoid self-referential lifetimes.
+/// The model is loaded on-demand per Ask AI session and dropped when the user
+/// leaves the tab to free RAM. The underlying `LlamaBackend` is **not** stored
+/// here — it lives in the `LLAMA_BACKEND` singleton and is never dropped.
 pub struct LlmEngine {
-    // Note: The backend must be dropped after the model.
-    backend: LlamaBackend,
     model: LlamaModel,
+}
+
+unsafe extern "C" fn llama_log_callback(
+    _level: llama_cpp_sys_4::ggml_log_level,
+    text: *const std::ffi::c_char,
+    _user_data: *mut std::ffi::c_void,
+) {
+    if !text.is_null() {
+        let c_str = std::ffi::CStr::from_ptr(text);
+        if let Ok(s) = c_str.to_str() {
+            let trimmed = s.trim_end();
+            if !trimmed.is_empty() {
+                log::info!("[llama.cpp] {}", trimmed);
+            }
+        }
+    }
 }
 
 impl LlmEngine {
     /// Load a GGUF model from disk. Expensive — only call on-demand.
     ///
+    /// Initialises the `LlamaBackend` singleton on the first call.
+    /// Subsequent calls reuse the existing backend without re-initialising it,
+    /// avoiding the `BackendAlreadyInitialized` error.
+    ///
     /// # Errors
     /// Returns an error if the backend cannot be initialized or the model cannot be loaded.
     pub fn load(model_path: &Path) -> Result<Self> {
         log::info!("Loading LLM model from: {}", model_path.display());
-        let backend = LlamaBackend::init()
-            .map_err(|e| anyhow::anyhow!("Failed to initialize LlamaBackend: {:?}", e))?;
+
+        unsafe {
+            llama_cpp_4::log_set(Some(llama_log_callback), std::ptr::null_mut());
+        }
+
+        // Obtain (or lazily initialise) the process-wide backend singleton.
+        // `get_or_try_init` is unstable on stable Rust (issue #109737), so we
+        // do it manually. The double-spawn guard in `start_ai_worker` ensures
+        // only one thread ever calls `load()` at a time, making the
+        // check-then-set sequence safe.
+        if LLAMA_BACKEND.get().is_none() {
+            log::info!("Initialising LlamaBackend singleton (first call only).");
+            let b = LlamaBackend::init()
+                .map_err(|e| anyhow::anyhow!("Failed to initialize LlamaBackend: {:?}", e))?;
+            // If somehow another thread beat us (shouldn't happen), discard.
+            let _ = LLAMA_BACKEND.set(b);
+        }
+        let backend = LLAMA_BACKEND
+            .get()
+            .expect("LlamaBackend singleton should be initialised by now");
 
         let model_params = LlamaModelParams::default();
-        let model = LlamaModel::load_from_file(&backend, model_path, &model_params)
+        let model = LlamaModel::load_from_file(backend, model_path, &model_params)
             .with_context(|| format!("Failed to load model: {}", model_path.display()))?;
 
         log::info!("LLM model loaded successfully.");
-        Ok(Self { backend, model })
+        Ok(Self { model })
     }
 
     /// Generate a response given a prompt string.
@@ -54,11 +106,17 @@ impl LlmEngine {
         log::info!("Generating response for prompt ({} chars)", prompt.len());
 
         // Create context on-demand for this generation run.
+        // Retrieve the already-initialised backend singleton — it is always
+        // populated at this point because `load()` must have succeeded first.
+        let backend = LLAMA_BACKEND
+            .get()
+            .expect("LlamaBackend singleton not initialised before generate()");
+
         let ctx_params = LlamaContextParams::default()
             .with_n_ctx(std::num::NonZeroU32::new(2048))
             .with_n_threads(8)
             .with_n_threads_batch(8);
-        let mut ctx = self.model.new_context(&self.backend, ctx_params)
+        let mut ctx = self.model.new_context(backend, ctx_params)
             .map_err(|e| anyhow::anyhow!("Failed to create context: {:?}", e))?;
 
         // 1. Tokenize the prompt.

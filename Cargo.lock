@@ -674,6 +674,7 @@ dependencies = [
  "ca-core",
  "encoding_rs",
  "llama-cpp-4",
+ "llama-cpp-sys-4",
  "log",
  "serde",
  "serde_json",

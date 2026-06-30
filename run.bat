@@ -5,7 +5,25 @@ echo               CACHE ADVISOR LAUNCHER
 echo ===================================================
 echo.
 echo Setting up environment variables...
-set LIBCLANG_PATH=D:\LLVM19\bin
+:: Auto-detect libclang from Visual Studio 2022 bundled LLVM (preferred)
+:: Falls back to standalone LLVM install if VS is not found.
+set LIBCLANG_PATH=
+if exist "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin\libclang.dll" (
+    set LIBCLANG_PATH=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin
+) else if exist "C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Tools\Llvm\x64\bin\libclang.dll" (
+    set LIBCLANG_PATH=C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Tools\Llvm\x64\bin
+) else if exist "C:\Program Files\LLVM\bin\libclang.dll" (
+    set LIBCLANG_PATH=C:\Program Files\LLVM\bin
+) else if exist "D:\LLVM19\bin\libclang.dll" (
+    set LIBCLANG_PATH=D:\LLVM19\bin
+)
+
+if "%LIBCLANG_PATH%"=="" (
+    echo [WARNING] libclang.dll tidak ditemukan. Build AI feature mungkin gagal.
+    echo           Install LLVM dari https://releases.llvm.org/ atau via Visual Studio Installer.
+) else (
+    echo [OK] LIBCLANG_PATH = %LIBCLANG_PATH%
+)
 
 :: Check if precompiled release binary exists
 set BIN_PATH=
