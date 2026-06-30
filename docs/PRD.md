@@ -31,20 +31,16 @@
 ## 1. Ringkasan Eksekutif
 
 **Cache Advisor** adalah aplikasi desktop native Windows yang menyelesaikan masalah
-*digital hoarding* dan kepenuhan disk: ia memindai folder-folder yang biasanya
-menumpuk file sampah (cache, temp, pre-render), mengklasifikasikan risiko tiap
-folder secara otomatis, menyarankan folder mana yang aman dihapus dan mana yang
-sebaiknya dipindahkan ke penyimpanan eksternal — semuanya dengan **human-in-the-loop**
-(pengguna selalu mengonfirmasi sebelum file diubah).
+*digital hoarding* dan kepenuhan disk dengan bertindak sebagai **Portable Storage Relocation & Auto-Routing Agent**: ia berjalan langsung dari penyimpanan eksternal (USB/HDD), memindai folder cache/temp laptop, memindahkan berkas sampah tersebut ke dalam dirinya sendiri (self-archiving), dan secara otomatis membelokkan variabel lingkungan (Environment Variables) Windows agar semua aplikasi target langsung menyimpan cache baru ke penyimpanan eksternal tanpa tindakan manual dari pengguna.
 
 Aplikasi ini adalah rebuild dari tool Python 217-baris sebelumnya (`cache_monitor.py`)
-menjadi aplikasi Rust native dengan tiga peningkatan inti:
+menjadi aplikasi Rust native dengan empat peningkatan inti:
 
 1. **Akurasi** — bug lama yang menghitung "ruang dibebaskan" sebagai jumlah *item*
    alih-alih *byte* telah diperbaiki dan teruji.
-2. **Advisory arsip** — fitur baru untuk memindahkan folder ke drive eksternal
-   dengan manifest JSON yang memungkinkan undo.
-3. **Panel AI opsional** — integrasi LLM lokal (llama.cpp) untuk menjawab pertanyaan
+2. **Relokasi & Auto-Routing** — memindahkan cache/temp ke disk tempat program berjalan dan memperbarui Environment Variables Windows secara otomatis agar aplikasi menulis langsung ke disk eksternal.
+3. **Mekanisme Undo (Recycle Bin)** — memindahkan berkas ke folder Recycle Bin lokal dengan manifest JSON sehingga bisa dikembalikan (undo) atau dihapus permanen (purge).
+4. **Panel AI opsional** — integrasi LLM lokal (llama.cpp) untuk menjawab pertanyaan
    bahasa natural tentang hasil scan. **Tidak pernah mengeksekusi aksi otomatis.**
 
 ### Posisi saat ini
@@ -56,7 +52,8 @@ menjadi aplikasi Rust native dengan tiga peningkatan inti:
 | GUI (egui: scan table, archive, disk map, duplicates) | ✅ Selesai, binary 3.8 MB |
 | Integrasi LLM (llama-cpp-4) | ✅ Selesai (AI panel, AI worker fully functional) |
 | Fitur Tambahan (Recycle Bin, Whitelist, Smart Duplicates) | ✅ Selesai (100% terintegrasi) |
-| Dokumentasi | 📝 Lengkap |
+| Relokasi & Auto-Routing (F10/F11/F12) | 🔨 In-progress (tahap desain & integrasi registry) |
+| Dokumentasi | 📝 Diperbarui (PRD v0.4.0) |
 
 ---
 
@@ -117,6 +114,8 @@ penting, dan bobot runtime yang membuat tool "ringan" jadi berat.
 | G5 | Ringan | Binary ≤ 25 MB; RAM resident ≤ 100 MB saat mode scan |
 | G6 | Semua di drive D | `CARGO_HOME`, target-dir, model, dan LLVM — tidak menulis ke C: |
 | G7 | AI opsional & terbatas | LLM hanya menjelaskan, tidak mengeksekusi; dimuat on-demand |
+| G8 | Portable Relocation | Deteksi drive letter tempat aplikasi berjalan untuk target pemindahan langsung ke dirinya sendiri |
+| G9 | Auto-Routing | Pembelokan variabel lingkungan pengguna (`HKCU`) di Windows secara otomatis agar aplikasi menulis langsung ke drive eksternal |
 
 ### 3.2 Non-Tujuan (Explicit Non-Goals)
 
@@ -558,6 +557,11 @@ CARGO_HOME=/d/.cargo cargo build --release -p cache-advisor --features ai
 - [x] Undo Cleaner (Safe Recycle Bin & Restore)
 - [x] Whitelist / Exclusion List (Monitored Folders)
 - [x] Smart Selection & Bulk Deletion (Duplicate Files)
+
+### 12.2 In-progress (v0.4.0)
+- [ ] F10: Deteksi Portable Mode & Relokasi ke Disk Program (Self-Archiving Container)
+- [ ] F11: Redirection Variabel Lingkungan Windows otomatis via Registry/PowerShell
+- [ ] F12: Admin/User Elevation Status Indicator di GUI
 
 ---
 
