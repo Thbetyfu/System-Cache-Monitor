@@ -388,6 +388,19 @@ Explain briefly for each recommendation.
 Answer:
 ```
 
+### 7.4 Rencana Pelatihan & Evolusi Agentic AI Lokal
+
+Untuk meningkatkan efisiensi dan keandalan sistem pembersihan, direncanakan proses pelatihan khusus (Domain-Specific Fine-Tuning) untuk model AI lokal:
+
+1. **Spesialis Pembersih Penyimpanan (Storage Cleaning Specialist):**
+   Model AI akan dilatih secara eksklusif menggunakan dataset pola penyimpanan berkas sampah, cache aplikasi, dan metadata sistem file. Pelatihan terfokus ini akan meningkatkan akurasi inferensi serta memperkecil parameter model agar dapat berjalan sangat cepat langsung dari USB/media eksternal.
+2. **Evolusi Kemampuan Eksekusi Agentic:**
+   Di masa mendatang, model AI akan dihubungkan dengan API eksekusi sistem langsung (tool calling) yang memungkinkannya bertindak sebagai agen otonom penuh untuk:
+   - Mengeksekusi instruksi CMD / PowerShell secara aman.
+   - Melakukan penghapusan, pemindahan (relokasi), dan penyalinan (copy) berkas.
+   - Mengubah Environment Variables Windows secara langsung.
+   - Memiliki hak akses penuh (full access) terhadap komputer dalam batas container media eksternal tempat program berjalan.
+
 ---
 
 ## 8. Persyaratan Non-Fungsional
@@ -438,11 +451,10 @@ baik untuk action manual maupun saran LLM.
 - Clean tidak menghapus folder itu sendiri, hanya isinya (folder bisa di-regenerasi
   oleh aplikasi pemilik).
 
-### 9.4 Batasan LLM yang ditegakkan di arsitektur
+### 9.4 Batasan LLM & Rencana Evolusi Agentic
 
-- LLM (`crate llm`) **tidak memiliki** dependency ke `crate actions`.
-- Output LLM adalah `String` mentah — tidak ada parser yang mengubahnya jadi
-  perintah. Pengguna wajib bertindak manual berdasarkan saran.
+- **Fase Saat Ini (Human-in-the-Loop Murni):** LLM (`crate llm`) tidak memiliki dependency ke `crate actions`. Output LLM berupa teks penjelasan mentah dan tidak diubah menjadi perintah eksekusi otomatis.
+- **Fase Masa Depan (Agentic Sandbox):** Saat model AI selesai dilatih khusus, AI akan diberikan akses penuh (eksekusi CMD, hapus, pindah, copy, ubah ENV) menggunakan arsitektur tool-calling dengan pengawasan keamanan terisolasi (sandbox) langsung dari media eksternal tempat program dijalankan.
 
 ---
 
