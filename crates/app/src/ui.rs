@@ -1,6 +1,6 @@
 //! Main UI state and rendering for all panels.
 
-use ca_actions::{clean_folder, clean_file, run_archive, CleanOutcome};
+use ca_actions::{run_archive, CleanOutcome};
 use ca_core::{
     archive::ArchivePlan,
     classifier::{classify, RiskLevel},
@@ -81,6 +81,10 @@ pub struct App {
     // Settings
     external_drive: String,
 
+    // Recycle Bin (Undo Cleaner)
+    recycle_root: PathBuf,
+    clean_sessions: Vec<ca_actions::CleanSession>,
+
     // Duplicates state
     duplicate_groups: Vec<ca_core::DuplicateGroup>,
     dup_scanning: bool,
@@ -134,6 +138,30 @@ impl App {
             archive_result: None,
             archive_error: None,
             external_drive: "E:/".into(),
+
+            recycle_root: {
+                let p = std::env::temp_dir().join("cache_advisor_recycle_bin");
+                let _ = std::fs::create_dir_all(&p);
+                p
+            },
+            clean_sessions: {
+                let r = std::env::temp_dir().join("cache_advisor_recycle_bin");
+                let mut sessions = Vec::new();
+                if let Ok(read_dir) = std::fs::read_dir(&r) {
+                    for entry in read_dir.flatten() {
+                        let manifest = entry.path().join(ca_actions::SESSION_MANIFEST_NAME);
+                        if manifest.exists() {
+                            if let Ok(content) = std::fs::read_to_string(&manifest) {
+                                if let Ok(session) = serde_json::from_str::<ca_actions::CleanSession>(&content) {
+                                    sessions.push(session);
+                                }
+                            }
+                        }
+                    }
+                }
+                sessions.sort_by(|a, b| b.timestamp_secs.cmp(&a.timestamp_secs));
+                sessions
+            },
 
             duplicate_groups: Vec::new(),
             dup_scanning: false,
@@ -504,6 +532,82 @@ impl App {
             ui.label(RichText::new("●").color(Color32::GRAY));
             ui.label("Protected");
         });
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(8.0);
+
+        // Recycle Bin / Undo Sessions
+        ui.collapsing("🗑 Recent Cleaning Sessions (Undo / Recycle Bin)", |ui| {
+            if self.clean_sessions.is_empty() {
+                ui.label("No recent cleaning sessions.");
+                return;
+            }
+
+            let mut session_to_restore = None;
+            let mut session_to_purge = None;
+
+            egui::ScrollArea::vertical().max_height(150.0).show(ui, |ui| {
+                for (idx, session) in self.clean_sessions.iter().enumerate() {
+                    ui.group(|ui| {
+                        ui.horizontal(|ui| {
+                            let formatted_time = format_timestamp(session.timestamp_secs);
+
+                            ui.label(format!(
+                                "Session {} (Freed {})",
+                                formatted_time,
+                                format_bytes(session.freed_bytes)
+                            ));
+                            ui.label(format!("({} items)", session.entries.len()));
+
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.button("🗑 Purge").clicked() {
+                                    session_to_purge = Some(idx);
+                                }
+                                if ui.button("⬆ Undo").clicked() {
+                                    session_to_restore = Some(idx);
+                                }
+                            });
+                        });
+                    });
+                }
+            });
+
+            if let Some(idx) = session_to_restore {
+                let session = &self.clean_sessions[idx];
+                let manifest_path = self.recycle_root.join(&session.session_id).join(ca_actions::SESSION_MANIFEST_NAME);
+                match ca_actions::restore_clean_session(&manifest_path) {
+                    Ok(_) => {
+                        self.clean_sessions.remove(idx);
+                        self.archive_result = Some("Pembersihan berhasil dibatalkan (Undo Clean sukses).".into());
+                        // Trigger Windows Toast Notification
+                        let _ = notify_rust::Notification::new()
+                            .summary("Cache Advisor")
+                            .body("Undo Clean: files successfully restored to their original paths.")
+                            .show();
+                    }
+                    Err(e) => {
+                        log::error!("Failed to restore clean session: {}", e);
+                        self.archive_error = Some(format!("Failed to undo clean: {}", e));
+                    }
+                }
+            }
+
+            if let Some(idx) = session_to_purge {
+                let session = &self.clean_sessions[idx];
+                let manifest_path = self.recycle_root.join(&session.session_id).join(ca_actions::SESSION_MANIFEST_NAME);
+                match ca_actions::purge_clean_session(&manifest_path) {
+                    Ok(_) => {
+                        self.clean_sessions.remove(idx);
+                        self.archive_result = Some("Sesi pembersihan berhasil dihapus secara permanen.".into());
+                    }
+                    Err(e) => {
+                        log::error!("Failed to purge clean session: {}", e);
+                        self.archive_error = Some(format!("Failed to purge clean: {}", e));
+                    }
+                }
+            }
+        });
     }
 
     // ─── Clean modal ────────────────────────────────────────────────────────
@@ -551,15 +655,22 @@ impl App {
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     if ui.button(RichText::new("✅ Yes, Clean").color(Color32::GREEN)).clicked() {
-                        match clean_folder(&path) {
-                            Ok(out) => {
-                                self.last_clean = Some(out.clone());
+                        match ca_actions::clean_folder_to_recycle_bin(&path, &self.recycle_root) {
+                            Ok(session) => {
+                                self.clean_sessions.insert(0, session.clone());
+                                let out = ca_actions::CleanOutcome {
+                                    freed_bytes: session.freed_bytes,
+                                    files_removed: session.entries.iter().filter(|e| !e.is_dir).count() as u64,
+                                    folders_removed: session.entries.iter().filter(|e| e.is_dir).count() as u64,
+                                    skipped: 0,
+                                };
+                                self.last_clean = Some(out);
                                 // Trigger Toast Notification
                                 let _ = notify_rust::Notification::new()
                                     .summary("Cache Advisor")
                                     .body(&format!(
                                         "Cleaned: freed {}",
-                                        format_bytes(out.freed_bytes)
+                                        format_bytes(session.freed_bytes)
                                     ))
                                     .show();
                             }
@@ -1003,8 +1114,10 @@ impl App {
 
                         if let Some((group_idx, path_idx)) = to_remove {
                             let path = &self.duplicate_groups[group_idx].file_paths[path_idx];
-                            match clean_file(path) {
-                                Ok(freed) => {
+                            match ca_actions::clean_file_to_recycle_bin(path, &self.recycle_root) {
+                                Ok(session) => {
+                                    self.clean_sessions.insert(0, session.clone());
+                                    let freed = session.freed_bytes;
                                     log::info!("Deleted duplicate file: {}, freed {} bytes", path.display(), freed);
                                     // Remove the path from our local state
                                     self.duplicate_groups[group_idx].file_paths.remove(path_idx);
@@ -1374,4 +1487,12 @@ fn hsl_to_color32(h: f32, s: f32, l: f32) -> egui::Color32 {
         ((g + m) * 255.0) as u8,
         ((b + m) * 255.0) as u8,
     )
+}
+
+fn format_timestamp(secs: u64) -> String {
+    if let Ok(ts) = jiff::Timestamp::from_second(secs as i64) {
+        ts.to_string()
+    } else {
+        secs.to_string()
+    }
 }
