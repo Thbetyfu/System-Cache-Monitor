@@ -90,6 +90,7 @@ pub struct App {
     duplicate_groups: Vec<ca_core::DuplicateGroup>,
     dup_scanning: bool,
     dup_rx: Option<Receiver<Vec<ca_core::DuplicateGroup>>>,
+    duplicate_selections: Vec<Vec<bool>>,
 
     // Disk Map state
     disk_scan_drive: String,
@@ -168,6 +169,7 @@ impl App {
             duplicate_groups: Vec::new(),
             dup_scanning: false,
             dup_rx: None,
+            duplicate_selections: Vec::new(),
 
             disk_scan_drive: "C:\\".into(),
             disk_scan_active: false,
@@ -1074,6 +1076,9 @@ impl App {
         };
         match rx.try_recv() {
             Ok(groups) => {
+                self.duplicate_selections = groups.iter()
+                    .map(|group| vec![false; group.file_paths.len()])
+                    .collect();
                 self.duplicate_groups = groups;
                 self.dup_scanning = false;
                 self.dup_rx = None;
@@ -1117,6 +1122,43 @@ impl App {
                 }
             });
 
+            ui.add_space(6.0);
+
+            if !self.duplicate_groups.is_empty() {
+                ui.horizontal(|ui| {
+                    ui.label("Smart Selection:");
+                    if ui.button("Keep Oldest").clicked() {
+                        self.select_duplicates_keep_oldest();
+                    }
+                    if ui.button("Keep Newest").clicked() {
+                        self.select_duplicates_keep_newest();
+                    }
+                    ui.separator();
+                    
+                    let mut selected_count = 0;
+                    let mut selected_bytes = 0;
+                    for (g_idx, group) in self.duplicate_groups.iter().enumerate() {
+                        for (p_idx, _) in group.file_paths.iter().enumerate() {
+                            if g_idx < self.duplicate_selections.len() && p_idx < self.duplicate_selections[g_idx].len() && self.duplicate_selections[g_idx][p_idx] {
+                                selected_count += 1;
+                                selected_bytes += group.file_size;
+                            }
+                        }
+                    }
+
+                    let btn_label = if selected_count > 0 {
+                        format!("🧹 Clean Selected Duplicates ({}, {})", selected_count, format_bytes(selected_bytes))
+                    } else {
+                        "🧹 Clean Selected Duplicates".to_string()
+                    };
+
+                    if ui.add_enabled(selected_count > 0, egui::Button::new(RichText::new(btn_label).color(Color32::RED))).clicked() {
+                        self.delete_selected_duplicates();
+                    }
+                });
+                ui.add_space(8.0);
+            }
+
             ui.separator();
             ui.add_space(8.0);
 
@@ -1145,10 +1187,11 @@ impl App {
 
                                 for (path_idx, path) in group.file_paths.iter().enumerate() {
                                     ui.horizontal(|ui| {
+                                        if group_idx < self.duplicate_selections.len() && path_idx < self.duplicate_selections[group_idx].len() {
+                                            ui.checkbox(&mut self.duplicate_selections[group_idx][path_idx], "");
+                                        }
                                         ui.label(path.display().to_string());
                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                            // Enable deletion only if there is more than 1 instance left in the group.
-                                            // This prevents deleting the last copy of the file.
                                             let can_delete = group.file_paths.len() > 1;
                                             let btn = ui.add_enabled(can_delete, egui::Button::new("🗑 Delete"));
                                             if btn.clicked() {
@@ -1168,11 +1211,12 @@ impl App {
                                     self.clean_sessions.insert(0, session.clone());
                                     let freed = session.freed_bytes;
                                     log::info!("Deleted duplicate file: {}, freed {} bytes", path.display(), freed);
-                                    // Remove the path from our local state
                                     self.duplicate_groups[group_idx].file_paths.remove(path_idx);
-                                    // If only one (or zero) path remains, remove the whole duplicate group
                                     if self.duplicate_groups[group_idx].file_paths.len() <= 1 {
                                         self.duplicate_groups.remove(group_idx);
+                                        self.duplicate_selections.remove(group_idx);
+                                    } else {
+                                        self.duplicate_selections[group_idx] = vec![false; self.duplicate_groups[group_idx].file_paths.len()];
                                     }
                                 }
                                 Err(e) => {
@@ -1183,6 +1227,120 @@ impl App {
                     });
             }
         });
+    }
+
+    fn select_duplicates_keep_oldest(&mut self) {
+        self.duplicate_selections.clear();
+        for group in &self.duplicate_groups {
+            let mut selections = vec![false; group.file_paths.len()];
+            let mut oldest_idx = 0;
+            let mut oldest_time = std::time::SystemTime::now();
+
+            for (idx, path) in group.file_paths.iter().enumerate() {
+                if let Ok(meta) = std::fs::metadata(path) {
+                    if let Ok(mtime) = meta.modified() {
+                        if mtime < oldest_time {
+                            oldest_time = mtime;
+                            oldest_idx = idx;
+                        }
+                    }
+                }
+            }
+
+            for idx in 0..group.file_paths.len() {
+                if idx != oldest_idx {
+                    selections[idx] = true;
+                }
+            }
+            self.duplicate_selections.push(selections);
+        }
+    }
+
+    fn select_duplicates_keep_newest(&mut self) {
+        self.duplicate_selections.clear();
+        for group in &self.duplicate_groups {
+            let mut selections = vec![false; group.file_paths.len()];
+            let mut newest_idx = 0;
+            let mut newest_time = std::time::SystemTime::UNIX_EPOCH;
+
+            for (idx, path) in group.file_paths.iter().enumerate() {
+                if let Ok(meta) = std::fs::metadata(path) {
+                    if let Ok(mtime) = meta.modified() {
+                        if mtime > newest_time {
+                            newest_time = mtime;
+                            newest_idx = idx;
+                        }
+                    }
+                }
+            }
+
+            for idx in 0..group.file_paths.len() {
+                if idx != newest_idx {
+                    selections[idx] = true;
+                }
+            }
+            self.duplicate_selections.push(selections);
+        }
+    }
+
+    fn delete_selected_duplicates(&mut self) {
+        let mut total_freed = 0;
+        let mut files_removed = 0;
+        let mut sessions = Vec::new();
+
+        for group_idx in (0..self.duplicate_groups.len()).rev() {
+            let mut paths_to_remove = Vec::new();
+            for path_idx in (0..self.duplicate_groups[group_idx].file_paths.len()).rev() {
+                if group_idx < self.duplicate_selections.len() && path_idx < self.duplicate_selections[group_idx].len() && self.duplicate_selections[group_idx][path_idx] {
+                    paths_to_remove.push(path_idx);
+                }
+            }
+
+            if paths_to_remove.len() == self.duplicate_groups[group_idx].file_paths.len() {
+                paths_to_remove.remove(0);
+            }
+
+            for &path_idx in &paths_to_remove {
+                let path = &self.duplicate_groups[group_idx].file_paths[path_idx];
+                match ca_actions::clean_file_to_recycle_bin(path, &self.recycle_root) {
+                    Ok(session) => {
+                        total_freed += session.freed_bytes;
+                        files_removed += 1;
+                        sessions.push(session);
+                    }
+                    Err(e) => {
+                        log::error!("Failed to delete duplicate file {}: {}", path.display(), e);
+                    }
+                }
+            }
+
+            // Remove files from back to front
+            for path_idx in paths_to_remove {
+                self.duplicate_groups[group_idx].file_paths.remove(path_idx);
+            }
+
+            if self.duplicate_groups[group_idx].file_paths.len() <= 1 {
+                self.duplicate_groups.remove(group_idx);
+                self.duplicate_selections.remove(group_idx);
+            } else {
+                self.duplicate_selections[group_idx] = vec![false; self.duplicate_groups[group_idx].file_paths.len()];
+            }
+        }
+
+        for session in sessions {
+            self.clean_sessions.insert(0, session);
+        }
+
+        if files_removed > 0 {
+            let _ = notify_rust::Notification::new()
+                .summary("Cache Advisor")
+                .body(&format!(
+                    "Cleaned Selected Duplicates: removed {} files, freed {}",
+                    files_removed,
+                    format_bytes(total_freed)
+                ))
+                .show();
+        }
     }
 
     /// Export the scan results and duplicate files info to JSON and formatted text.
