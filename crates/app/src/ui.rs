@@ -12,6 +12,40 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use crate::tray::init_tray;
 
+struct RedirectionOption {
+    name: &'static str,
+    env_vars: &'static [&'static str],
+    sub_folder: &'static str,
+    description: &'static str,
+}
+
+const REDIRECTION_OPTIONS: &[RedirectionOption] = &[
+    RedirectionOption {
+        name: "User Temp Files",
+        env_vars: &["TEMP", "TMP"],
+        sub_folder: "Temp",
+        description: "Redirects standard user temporary directories (%TEMP% / %TMP%) to USB",
+    },
+    RedirectionOption {
+        name: "Python Pip Cache",
+        env_vars: &["PIP_CACHE_DIR"],
+        sub_folder: "pip_cache",
+        description: "Redirects pip packages download cache (PIP_CACHE_DIR) to USB",
+    },
+    RedirectionOption {
+        name: "HuggingFace ML Models",
+        env_vars: &["HF_HOME"],
+        sub_folder: "huggingface",
+        description: "Redirects large ML models and datasets downloaded via HuggingFace to USB",
+    },
+    RedirectionOption {
+        name: "Rust Cargo & Rustup Toolchain",
+        env_vars: &["CARGO_HOME", "RUSTUP_HOME"],
+        sub_folder: "rust_toolchain",
+        description: "Redirects downloaded Rust toolchains and crate registries cache to USB",
+    },
+];
+
 /// Which tab is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -19,6 +53,7 @@ enum Tab {
     Archive,
     Duplicates,
     DiskMap,
+    Portable,
     #[cfg(feature = "ai")]
     AskAi,
 }
@@ -82,6 +117,11 @@ pub struct App {
     external_drive: String,
     exclusion_input: String,
 
+    // Portable Mode (Auto-Routing)
+    is_admin_user: bool,
+    portable_drive: Option<PathBuf>,
+    active_redirections: Vec<bool>,
+
     // Recycle Bin (Undo Cleaner)
     recycle_root: PathBuf,
     clean_sessions: Vec<ca_actions::CleanSession>,
@@ -119,6 +159,37 @@ impl App {
     pub fn new() -> Self {
         let settings = ca_core::Settings::load(std::path::Path::new("settings.toml"));
         let rules = settings.ruleset();
+        
+        let is_admin_user = ca_core::is_admin();
+        let portable_drive = if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(drive) = exe_path.to_string_lossy().split(":\\").next() {
+                Some(PathBuf::from(format!("{}:\\", drive)))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let mut active_redirections = Vec::new();
+        if let Some(drive) = &portable_drive {
+            let base_path = drive.join("cache_advisor_portable");
+            for opt in REDIRECTION_OPTIONS {
+                let mut all_match = true;
+                for &var in opt.env_vars {
+                    let target_path = base_path.join(opt.sub_folder).to_string_lossy().to_string();
+                    if let Ok(Some(current_val)) = ca_core::get_user_env(var) {
+                        if current_val.to_lowercase() != target_path.to_lowercase() {
+                            all_match = false;
+                        }
+                    } else {
+                        all_match = false;
+                    }
+                }
+                active_redirections.push(all_match);
+            }
+        }
+
         Self {
             settings,
             rules,
@@ -141,6 +212,9 @@ impl App {
             archive_error: None,
             external_drive: "E:/".into(),
             exclusion_input: String::new(),
+            is_admin_user,
+            portable_drive,
+            active_redirections,
 
             recycle_root: {
                 let p = std::env::temp_dir().join("cache_advisor_recycle_bin");
@@ -355,8 +429,17 @@ impl eframe::App for App {
                 ui.selectable_value(&mut self.selected_tab, Tab::Archive, "📦 Archive");
                 ui.selectable_value(&mut self.selected_tab, Tab::Duplicates, "🔍 Duplicates");
                 ui.selectable_value(&mut self.selected_tab, Tab::DiskMap, "🗺 Disk Map");
+                ui.selectable_value(&mut self.selected_tab, Tab::Portable, "🔌 Portable Mode");
                 #[cfg(feature = "ai")]
                 ui.selectable_value(&mut self.selected_tab, Tab::AskAi, "🤖 Ask AI");
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if self.is_admin_user {
+                        ui.label(RichText::new("🛡 Admin Mode").color(Color32::GREEN).strong());
+                    } else {
+                        ui.label(RichText::new("👤 User Mode").color(Color32::GRAY));
+                    }
+                });
             });
         });
 
@@ -372,6 +455,7 @@ impl eframe::App for App {
                 Tab::Archive => self.panel_archive(ui),
                 Tab::Duplicates => self.panel_duplicates(ui),
                 Tab::DiskMap => self.panel_disk_map(ui, ctx),
+                Tab::Portable => self.panel_portable(ui),
                 #[cfg(feature = "ai")]
                 Tab::AskAi => self.panel_ask_ai(ui, ctx),
             }
@@ -1091,6 +1175,28 @@ impl App {
         }
     }
 
+    fn check_redirections_status(&mut self) {
+        if let Some(drive) = &self.portable_drive {
+            let base_path = drive.join("cache_advisor_portable");
+            self.active_redirections.clear();
+
+            for opt in REDIRECTION_OPTIONS {
+                let mut all_match = true;
+                for &var in opt.env_vars {
+                    let target_path = base_path.join(opt.sub_folder).to_string_lossy().to_string();
+                    if let Ok(Some(current_val)) = ca_core::get_user_env(var) {
+                        if current_val.to_lowercase() != target_path.to_lowercase() {
+                            all_match = false;
+                        }
+                    } else {
+                        all_match = false;
+                    }
+                }
+                self.active_redirections.push(all_match);
+            }
+        }
+    }
+
     /// Spawn a thread to scan for duplicates.
     fn start_duplicates_scan(&mut self) {
         let directories: Vec<PathBuf> = self.rules.folders.iter().map(|f| f.path.clone()).collect();
@@ -1341,6 +1447,110 @@ impl App {
                 ))
                 .show();
         }
+    }
+
+    fn panel_portable(&mut self, ui: &mut egui::Ui) {
+        ui.vertical(|ui| {
+            ui.heading("🔌 Portable Mode & Auto-Routing Agent");
+            ui.add_space(8.0);
+            ui.label(
+                "Run Cache Advisor from an external USB/HDD drive to redirect application cache folders into it. \
+                This prevents your C: drive from filling up by automatically routing data to the external drive."
+            );
+            ui.add_space(12.0);
+
+            ui.group(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Privilege Status:");
+                    if self.is_admin_user {
+                        ui.label(RichText::new("🛡 Administrator").color(Color32::GREEN).strong());
+                    } else {
+                        ui.label(RichText::new("👤 User").color(Color32::YELLOW).strong());
+                        ui.label("(Some system-wide temp files may need Admin privileges to clean)");
+                    }
+                });
+
+                ui.add_space(6.0);
+
+                ui.horizontal(|ui| {
+                    ui.label("Detected Program Drive:");
+                    if let Some(drive) = &self.portable_drive {
+                        ui.strong(format!("{}", drive.display()));
+                    } else {
+                        ui.label(RichText::new("Not detected").color(Color32::RED));
+                    }
+                });
+            });
+
+            ui.add_space(16.0);
+            ui.separator();
+            ui.add_space(16.0);
+
+            ui.heading("📦 Application Cache Auto-Routing");
+            ui.add_space(8.0);
+
+            if let Some(drive) = &self.portable_drive {
+                let base_path = drive.join("cache_advisor_portable");
+                let mut status_changed = false;
+
+                for (idx, opt) in REDIRECTION_OPTIONS.iter().enumerate() {
+                    ui.group(|ui| {
+                        ui.horizontal(|ui| {
+                            let mut is_active = idx < self.active_redirections.len() && self.active_redirections[idx];
+                            if ui.checkbox(&mut is_active, RichText::new(opt.name).strong().size(14.0)).clicked() {
+                                let target_path = base_path.join(opt.sub_folder).to_string_lossy().to_string();
+                                
+                                for &var in opt.env_vars {
+                                    if is_active {
+                                        let _ = std::fs::create_dir_all(base_path.join(opt.sub_folder));
+                                        if let Ok(_success) = ca_core::set_user_env(var, &target_path) {
+                                            log::info!("Set environment variable {} to {}", var, target_path);
+                                        }
+                                    } else {
+                                        if opt.name == "User Temp Files" {
+                                            let default_temp = "%USERPROFILE%\\AppData\\Local\\Temp";
+                                            let _ = ca_core::set_user_env(var, default_temp);
+                                        } else {
+                                            let _ = ca_core::unset_user_env(var);
+                                        }
+                                        log::info!("Restored environment variable {}", var);
+                                    }
+                                }
+                                status_changed = true;
+                            }
+
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if idx < self.active_redirections.len() && self.active_redirections[idx] {
+                                    ui.label(RichText::new("ACTIVE (Routed to USB)").color(Color32::GREEN).strong());
+                                } else {
+                                    ui.label(RichText::new("DEFAULT (C: Drive)").color(Color32::GRAY));
+                                }
+                            });
+                        });
+
+                        ui.add_space(4.0);
+                        ui.label(opt.description);
+                        
+                        let target_dir = base_path.join(opt.sub_folder);
+                        ui.label(RichText::new(format!("USB Path: {}", target_dir.display())).weak());
+                    });
+                    ui.add_space(8.0);
+                }
+
+                if status_changed {
+                    self.check_redirections_status();
+                    let _ = notify_rust::Notification::new()
+                        .summary("Cache Advisor")
+                        .body("Environment variables updated successfully. Restart applications to apply changes.")
+                        .show();
+                }
+            } else {
+                ui.label(
+                    RichText::new("Please run the application from an external drive to enable Auto-Routing features.")
+                        .color(Color32::RED)
+                );
+            }
+        });
     }
 
     /// Export the scan results and duplicate files info to JSON and formatted text.
