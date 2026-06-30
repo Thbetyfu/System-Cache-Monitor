@@ -122,6 +122,41 @@ impl Default for RuleSet {
                 note: Some("Dev tool data; monitor only.".into()),
                 archive_dest: None,
             },
+            FolderRule {
+                name: "Google Chrome Cache".into(),
+                path: dirs_appdata(r"%LOCALAPPDATA%\Google\Chrome\User Data\Default\Cache\Cache_Data"),
+                tier: Cache,
+                note: Some("Google Chrome browser cache.".into()),
+                archive_dest: None,
+            },
+            FolderRule {
+                name: "Microsoft Edge Cache".into(),
+                path: dirs_appdata(r"%LOCALAPPDATA%\Microsoft\Edge\User Data\Default\Cache\Cache_Data"),
+                tier: Cache,
+                note: Some("Microsoft Edge browser cache.".into()),
+                archive_dest: None,
+            },
+            FolderRule {
+                name: "Spotify Cache".into(),
+                path: dirs_appdata(r"%LOCALAPPDATA%\Spotify\Storage"),
+                tier: Cache,
+                note: Some("Spotify offline audio track cache.".into()),
+                archive_dest: None,
+            },
+            FolderRule {
+                name: "Discord Cache".into(),
+                path: dirs_appdata(r"%APPDATA%\discord\Cache\Cache_Data"),
+                tier: Cache,
+                note: Some("Discord image & asset cache.".into()),
+                archive_dest: None,
+            },
+            FolderRule {
+                name: "Slack Cache".into(),
+                path: dirs_appdata(r"%APPDATA%\Slack\Cache\Cache_Data"),
+                tier: Cache,
+                note: Some("Slack client cache.".into()),
+                archive_dest: None,
+            },
         ];
         Self { folders }
     }
