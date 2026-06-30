@@ -400,6 +400,10 @@ Untuk meningkatkan efisiensi dan keandalan sistem pembersihan, direncanakan pros
    - Melakukan penghapusan, pemindahan (relokasi), dan penyalinan (copy) berkas.
    - Mengubah Environment Variables Windows secara langsung.
    - Memiliki hak akses penuh (full access) terhadap komputer dalam batas container media eksternal tempat program berjalan.
+3. **Pilihan Hak Akses Pengguna (Full Access vs Restricted Mode):**
+   Aplikasi akan menyediakan toggle opsi perizinan eksplisit di antarmuka GUI:
+   - **Restricted Mode (Default/Safety First):** Operasi AI dibatasi secara ketat hanya pada penulisan/pembersihan di dalam container drive eksternal (USB/HDD) saja.
+   - **Full Access Mode:** Pengguna secara sadar memberikan izin penuh kepada AI untuk mengakses dan memodifikasi file komputer secara menyeluruh, mengubah Environment Variables eksternal, menulis ke disk internal (C:), dan menjalankan perintah sistem secara otonom.
 
 ---
 
@@ -454,7 +458,7 @@ baik untuk action manual maupun saran LLM.
 ### 9.4 Batasan LLM & Rencana Evolusi Agentic
 
 - **Fase Saat Ini (Human-in-the-Loop Murni):** LLM (`crate llm`) tidak memiliki dependency ke `crate actions`. Output LLM berupa teks penjelasan mentah dan tidak diubah menjadi perintah eksekusi otomatis.
-- **Fase Masa Depan (Agentic Sandbox):** Saat model AI selesai dilatih khusus, AI akan diberikan akses penuh (eksekusi CMD, hapus, pindah, copy, ubah ENV) menggunakan arsitektur tool-calling dengan pengawasan keamanan terisolasi (sandbox) langsung dari media eksternal tempat program dijalankan.
+- **Fase Masa Depan (Agentic Sandbox & Permission Model):** Saat model AI selesai dilatih khusus, eksekusi otonom (CMD, file operations, ENV) dibatasi berdasarkan pilihan perizinan pengguna. Pada **Restricted Mode**, AI di-sandbox hanya di dalam USB drive. Pada **Full Access Mode**, AI diberikan wewenang penuh untuk melakukan perubahan menyeluruh pada sistem komputer host sesuai perintah pengguna.
 
 ---
 
