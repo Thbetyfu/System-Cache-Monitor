@@ -12,39 +12,127 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use crate::tray::init_tray;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RedirectionType {
+    EnvVar,
+    Junction,
+}
+
 struct RedirectionOption {
     name: &'static str,
+    redirection_type: RedirectionType,
     env_vars: &'static [&'static str],
+    c_path_var: &'static str,
+    c_path_sub: &'static str,
     sub_folder: &'static str,
+    process_names: &'static [&'static str],
     description: &'static str,
 }
 
 const REDIRECTION_OPTIONS: &[RedirectionOption] = &[
     RedirectionOption {
         name: "User Temp Files",
+        redirection_type: RedirectionType::EnvVar,
         env_vars: &["TEMP", "TMP"],
+        c_path_var: "",
+        c_path_sub: "",
         sub_folder: "Temp",
+        process_names: &[],
         description: "Redirects standard user temporary directories (%TEMP% / %TMP%) to USB",
     },
     RedirectionOption {
         name: "Python Pip Cache",
+        redirection_type: RedirectionType::EnvVar,
         env_vars: &["PIP_CACHE_DIR"],
+        c_path_var: "",
+        c_path_sub: "",
         sub_folder: "pip_cache",
+        process_names: &["python.exe", "pip.exe"],
         description: "Redirects pip packages download cache (PIP_CACHE_DIR) to USB",
     },
     RedirectionOption {
         name: "HuggingFace ML Models",
+        redirection_type: RedirectionType::EnvVar,
         env_vars: &["HF_HOME"],
+        c_path_var: "",
+        c_path_sub: "",
         sub_folder: "huggingface",
+        process_names: &["python.exe"],
         description: "Redirects large ML models and datasets downloaded via HuggingFace to USB",
     },
     RedirectionOption {
-        name: "Rust Cargo & Rustup Toolchain",
+        name: "Rust Cargo & Rustup",
+        redirection_type: RedirectionType::EnvVar,
         env_vars: &["CARGO_HOME", "RUSTUP_HOME"],
+        c_path_var: "",
+        c_path_sub: "",
         sub_folder: "rust_toolchain",
+        process_names: &["cargo.exe", "rustc.exe"],
         description: "Redirects downloaded Rust toolchains and crate registries cache to USB",
     },
+    RedirectionOption {
+        name: "VS Code Cached Data",
+        redirection_type: RedirectionType::Junction,
+        env_vars: &[],
+        c_path_var: "APPDATA",
+        c_path_sub: "Code/CachedData",
+        sub_folder: "vscode_cached_data",
+        process_names: &["code.exe"],
+        description: "Redirects VS Code caches to USB (reduces C: drive storage bloat)",
+    },
+    RedirectionOption {
+        name: "CapCut Pre-Render Cache",
+        redirection_type: RedirectionType::Junction,
+        env_vars: &[],
+        c_path_var: "LOCALAPPDATA",
+        c_path_sub: "CapCut/segmentPrerenderCache",
+        sub_folder: "capcut_prerender",
+        process_names: &["CapCut.exe"],
+        description: "Redirects heavy video pre-render caches of CapCut to USB",
+    },
+    RedirectionOption {
+        name: "Spotify Local Cache",
+        redirection_type: RedirectionType::Junction,
+        env_vars: &[],
+        c_path_var: "LOCALAPPDATA",
+        c_path_sub: "Spotify/Storage",
+        sub_folder: "spotify_cache",
+        process_names: &["Spotify.exe"],
+        description: "Redirects offline/downloaded songs cache of Spotify to USB",
+    },
+    RedirectionOption {
+        name: "Discord Local Cache",
+        redirection_type: RedirectionType::Junction,
+        env_vars: &[],
+        c_path_var: "APPDATA",
+        c_path_sub: "discord/Cache",
+        sub_folder: "discord_cache",
+        process_names: &["Discord.exe"],
+        description: "Redirects cache files from Discord to USB",
+    },
 ];
+
+fn resolve_c_path(opt: &RedirectionOption) -> Option<PathBuf> {
+    if opt.redirection_type != RedirectionType::Junction {
+        return None;
+    }
+    if let Ok(base) = std::env::var(opt.c_path_var) {
+        Some(PathBuf::from(base).join(opt.c_path_sub))
+    } else {
+        None
+    }
+}
+
+fn resolve_env_var_default_c_path(name: &str) -> Option<PathBuf> {
+    let userprofile = std::env::var("USERPROFILE").ok()?;
+    let profile_path = PathBuf::from(userprofile);
+    match name {
+        "Python Pip Cache" => Some(profile_path.join("AppData/Local/pip/cache")),
+        "HuggingFace ML Models" => Some(profile_path.join(".cache/huggingface")),
+        "Rust Cargo & Rustup" => Some(profile_path.join(".cargo")),
+        _ => None,
+    }
+}
 
 /// Which tab is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +209,9 @@ pub struct App {
     is_admin_user: bool,
     portable_drive: Option<PathBuf>,
     active_redirections: Vec<bool>,
+    lock_warning_msg: Option<String>,
+    is_migrating: bool,
+    migration_rx: Option<Receiver<std::io::Result<()>>>,
 
     // Recycle Bin (Undo Cleaner)
     recycle_root: PathBuf,
@@ -215,6 +306,9 @@ impl App {
             is_admin_user,
             portable_drive,
             active_redirections,
+            lock_warning_msg: None,
+            is_migrating: false,
+            migration_rx: None,
 
             recycle_root: {
                 let p = std::env::temp_dir().join("cache_advisor_recycle_bin");
@@ -331,6 +425,7 @@ impl eframe::App for App {
         self.poll_scan();
         self.poll_duplicates();
         self.poll_disk_scan();
+        self.poll_migration();
 
         #[cfg(feature = "ai")]
         self.poll_ai();
@@ -463,6 +558,7 @@ impl eframe::App for App {
 
         // ── Clean confirmation modal ──
         self.modal_clean(ctx);
+        self.modal_lock_warning(ctx);
 
         // ── Bottom status bar ──
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
@@ -819,6 +915,28 @@ impl App {
                     }
                 });
             });
+    }
+
+    fn modal_lock_warning(&mut self, ctx: &egui::Context) {
+        if let Some(msg) = &self.lock_warning_msg {
+            let msg_clone = msg.clone();
+            egui::Window::new("⚠ Warning")
+                .collapsible(false)
+                .resizable(false)
+                .pivot(egui::Align2::CENTER_CENTER)
+                .default_width(350.0)
+                .show(ctx, |ui| {
+                    ui.label(RichText::new("Application Lock / Notification").strong().size(16.0));
+                    ui.add_space(8.0);
+                    ui.label(&msg_clone);
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("OK").clicked() {
+                            self.lock_warning_msg = None;
+                        }
+                    });
+                });
+        }
     }
 }
 
@@ -1181,18 +1299,60 @@ impl App {
             self.active_redirections.clear();
 
             for opt in REDIRECTION_OPTIONS {
-                let mut all_match = true;
-                for &var in opt.env_vars {
-                    let target_path = base_path.join(opt.sub_folder).to_string_lossy().to_string();
-                    if let Ok(Some(current_val)) = ca_core::get_user_env(var) {
-                        if current_val.to_lowercase() != target_path.to_lowercase() {
-                            all_match = false;
+                match opt.redirection_type {
+                    RedirectionType::EnvVar => {
+                        let mut all_match = true;
+                        for &var in opt.env_vars {
+                            let target_path = base_path.join(opt.sub_folder).to_string_lossy().to_string();
+                            if let Ok(Some(current_val)) = ca_core::get_user_env(var) {
+                                if current_val.to_lowercase() != target_path.to_lowercase() {
+                                    all_match = false;
+                                }
+                            } else {
+                                all_match = false;
+                            }
                         }
-                    } else {
-                        all_match = false;
+                        self.active_redirections.push(all_match);
+                    }
+                    RedirectionType::Junction => {
+                        if let Some(c_path) = resolve_c_path(opt) {
+                            self.active_redirections.push(ca_core::is_junction(&c_path));
+                        } else {
+                            self.active_redirections.push(false);
+                        }
                     }
                 }
-                self.active_redirections.push(all_match);
+            }
+        }
+    }
+
+    fn poll_migration(&mut self) {
+        let rx = match &self.migration_rx {
+            Some(r) => r,
+            None => return,
+        };
+        match rx.try_recv() {
+            Ok(result) => {
+                self.is_migrating = false;
+                self.migration_rx = None;
+                self.check_redirections_status();
+                match result {
+                    Ok(_) => {
+                        let _ = notify_rust::Notification::new()
+                            .summary("Cache Advisor")
+                            .body("Relocation and redirection completed successfully.")
+                            .show();
+                    }
+                    Err(e) => {
+                        self.lock_warning_msg = Some(format!("Migration failed: {}", e));
+                    }
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.is_migrating = false;
+                self.migration_rx = None;
+                self.check_redirections_status();
             }
         }
     }
@@ -1450,6 +1610,17 @@ impl App {
     }
 
     fn panel_portable(&mut self, ui: &mut egui::Ui) {
+        if self.is_migrating {
+            ui.vertical_centered(|ui| {
+                ui.add_space(100.0);
+                ui.spinner();
+                ui.add_space(10.0);
+                ui.label(RichText::new("Migrating data and configuring links. Please wait...").strong().size(16.0));
+                ui.label("Do not disconnect your external storage drive.");
+            });
+            return;
+        }
+
         ui.vertical(|ui| {
             ui.heading("🔌 Portable Mode & Auto-Routing Agent");
             ui.add_space(8.0);
@@ -1491,32 +1662,104 @@ impl App {
 
             if let Some(drive) = &self.portable_drive {
                 let base_path = drive.join("cache_advisor_portable");
-                let mut status_changed = false;
 
                 for (idx, opt) in REDIRECTION_OPTIONS.iter().enumerate() {
                     ui.group(|ui| {
                         ui.horizontal(|ui| {
                             let mut is_active = idx < self.active_redirections.len() && self.active_redirections[idx];
                             if ui.checkbox(&mut is_active, RichText::new(opt.name).strong().size(14.0)).clicked() {
-                                let target_path = base_path.join(opt.sub_folder).to_string_lossy().to_string();
-                                
-                                for &var in opt.env_vars {
-                                    if is_active {
-                                        let _ = std::fs::create_dir_all(base_path.join(opt.sub_folder));
-                                        if let Ok(_success) = ca_core::set_user_env(var, &target_path) {
-                                            log::info!("Set environment variable {} to {}", var, target_path);
-                                        }
-                                    } else {
-                                        if opt.name == "User Temp Files" {
-                                            let default_temp = "%USERPROFILE%\\AppData\\Local\\Temp";
-                                            let _ = ca_core::set_user_env(var, default_temp);
-                                        } else {
-                                            let _ = ca_core::unset_user_env(var);
-                                        }
-                                        log::info!("Restored environment variable {}", var);
+                                // 1. Check running processes to prevent locked file issues
+                                let mut running_processes = Vec::new();
+                                for &proc in opt.process_names {
+                                    if ca_core::is_process_running(proc) {
+                                        running_processes.push(proc);
                                     }
                                 }
-                                status_changed = true;
+
+                                if !running_processes.is_empty() {
+                                    self.lock_warning_msg = Some(format!(
+                                        "Cannot modify redirection because associated applications are currently running.\n\
+                                        Please close the following apps and try again:\n  {}",
+                                        running_processes.join(", ")
+                                    ));
+                                    return;
+                                }
+
+                                // 2. Trigger async background migration
+                                let target_usb_path = base_path.join(opt.sub_folder);
+                                let (tx, rx) = std::sync::mpsc::channel();
+                                self.migration_rx = Some(rx);
+                                self.is_migrating = true;
+
+                                let opt_name = opt.name.to_string();
+                                let target_usb_path_clone = target_usb_path.clone();
+                                let is_active_clone = is_active;
+
+                                std::thread::spawn(move || {
+                                    let opt_ref = REDIRECTION_OPTIONS.iter().find(|o| o.name == opt_name).unwrap();
+                                    
+                                    let res = match opt_ref.redirection_type {
+                                        RedirectionType::EnvVar => {
+                                            let res_migration = if opt_ref.name != "User Temp Files" {
+                                                if let Some(c_path) = resolve_env_var_default_c_path(&opt_name) {
+                                                    if is_active_clone {
+                                                        ca_core::migrate_folder(&c_path, &target_usb_path_clone)
+                                                    } else {
+                                                        let _ = std::fs::create_dir_all(&c_path);
+                                                        ca_core::migrate_folder(&target_usb_path_clone, &c_path)
+                                                    }
+                                                } else {
+                                                    Ok(())
+                                                }
+                                            } else {
+                                                Ok(())
+                                            };
+
+                                            res_migration.and_then(|_| {
+                                                let target_path = target_usb_path_clone.to_string_lossy().to_string();
+                                                for &var in opt_ref.env_vars {
+                                                    if is_active_clone {
+                                                        let _ = std::fs::create_dir_all(&target_usb_path_clone);
+                                                        let _ = ca_core::set_user_env(var, &target_path);
+                                                    } else {
+                                                        if opt_ref.name == "User Temp Files" {
+                                                            let default_temp = "%USERPROFILE%\\AppData\\Local\\Temp";
+                                                            let _ = ca_core::set_user_env(var, default_temp);
+                                                        } else {
+                                                            let _ = ca_core::unset_user_env(var);
+                                                        }
+                                                    }
+                                                }
+                                                Ok(())
+                                            })
+                                        }
+                                        RedirectionType::Junction => {
+                                            if let Some(c_path) = resolve_c_path(opt_ref) {
+                                                if is_active_clone {
+                                                    if c_path.exists() && !ca_core::is_junction(&c_path) {
+                                                        ca_core::migrate_folder(&c_path, &target_usb_path_clone)
+                                                            .and_then(|_| ca_core::create_junction(&c_path, &target_usb_path_clone).map(|_| ()))
+                                                    } else {
+                                                        let _ = std::fs::create_dir_all(&target_usb_path_clone);
+                                                        ca_core::create_junction(&c_path, &target_usb_path_clone).map(|_| ())
+                                                    }
+                                                } else {
+                                                    if ca_core::is_junction(&c_path) {
+                                                        let _ = ca_core::delete_junction(&c_path);
+                                                    }
+                                                    let _ = std::fs::create_dir_all(&c_path);
+                                                    ca_core::migrate_folder(&target_usb_path_clone, &c_path)
+                                                }
+                                            } else {
+                                                Err(std::io::Error::new(
+                                                    std::io::ErrorKind::NotFound,
+                                                    "C: Drive path could not be resolved."
+                                                ))
+                                            }
+                                        }
+                                    };
+                                    let _ = tx.send(res);
+                                });
                             }
 
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1532,17 +1775,9 @@ impl App {
                         ui.label(opt.description);
                         
                         let target_dir = base_path.join(opt.sub_folder);
-                        ui.label(RichText::new(format!("USB Path: {}", target_dir.display())).weak());
+                        ui.label(RichText::new(format!("USB Target Path: {}", target_dir.display())).weak());
                     });
                     ui.add_space(8.0);
-                }
-
-                if status_changed {
-                    self.check_redirections_status();
-                    let _ = notify_rust::Notification::new()
-                        .summary("Cache Advisor")
-                        .body("Environment variables updated successfully. Restart applications to apply changes.")
-                        .show();
                 }
             } else {
                 ui.label(
