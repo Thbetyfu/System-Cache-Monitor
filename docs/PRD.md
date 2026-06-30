@@ -51,11 +51,12 @@ menjadi aplikasi Rust native dengan tiga peningkatan inti:
 
 | Komponen | Status |
 |---|---|
-| Core logic (scan + classify + archive plan) | ✅ Selesai, 9 unit test lulus |
-| Actions (clean + archive + undo) | ✅ Selesai, 7 unit test lulus |
-| GUI (egui: scan table + clean + archive) | ✅ Selesai, binary 3.8 MB |
-| Integrasi LLM (llama-cpp-4) | 🔨 In-progress (toolchain siap, API wiring tahap akhir) |
-| Dokumentasi | 📝 Sebagian (PRD ini) |
+| Core logic (scan + classify + archive plan) | ✅ Selesai, 14 unit test lulus (termasuk Disk Map) |
+| Actions (clean + archive + undo) | ✅ Selesai, 10 unit test lulus (termasuk Undo Cleaner) |
+| GUI (egui: scan table, archive, disk map, duplicates) | ✅ Selesai, binary 3.8 MB |
+| Integrasi LLM (llama-cpp-4) | ✅ Selesai (AI panel, AI worker fully functional) |
+| Fitur Tambahan (Recycle Bin, Whitelist, Smart Duplicates) | ✅ Selesai (100% terintegrasi) |
+| Dokumentasi | 📝 Lengkap |
 
 ---
 
@@ -317,6 +318,28 @@ dengan kemampuan mengembalikan.
 - Output: teks saran bahasa natural.
 - **Garansi keamanan:** output LLM tidak pernah diparsing menjadi perintah
   eksekusi. Pengguna harus tetap klik tombol Clean/Archive manual.
+- **Status:** ✅ Selesai
+
+### 6.6 F6 — Disk Map (TreeMap Disk Visualizer)
+- Visualisasi penggunaan ruang penyimpanan seluruh isi drive secara asinkron (background thread) menggunakan algoritme TreeMap interaktif (Slice-and-Dice).
+- Pemindaian paralel menggunakan Rayon dengan pemangkasan otomatis (pruning) file/folder berukuran < 5 MB untuk menjaga GUI tetap responsif di 60 FPS.
+- Navigasi Zoom In (double-click pada folder) dan Zoom Out (tombol "Go Up").
+- **Status:** ✅ Selesai
+
+### 6.7 F7 — Undo Cleaner (Safe Recycle Bin & Restore)
+- Aksi pembersihan tidak lagi menghapus berkas secara permanen secara langsung. Berkas dipindahkan ke folder Recycle Bin lokal di sistem dengan manifes detail dalam format JSON.
+- Panel GUI lipat menyediakan daftar riwayat sesi pembersihan beserta tombol **Undo** untuk memulihkan berkas ke lokasi asal secara aman, serta tombol **Purge** untuk membersihkan ruang penyimpanan secara permanen.
+- **Status:** ✅ Selesai
+
+### 6.8 F8 — Whitelist / Exclusion List (Monitored Folders)
+- Pengguna dapat mengecualikan path tertentu dari pemindaian dan pemeriksaan duplikat secara dinamis dari antarmuka GUI.
+- Whitelist disimpan dan dibaca secara real-time ke/dari berkas `settings.toml`.
+- **Status:** ✅ Selesai
+
+### 6.9 F9 — Smart Selection & Bulk Deletion (Duplicate Files)
+- Menyediakan tombol pemilih otomatis **Keep Oldest** dan **Keep Newest** berdasarkan metadata modifikasi berkas asli untuk menyaring berkas duplikat yang akan dibersihkan secara otomatis.
+- Tombol hapus massal (**Clean Selected Duplicates**) yang aman dengan perlindungan agar tidak menghapus salinan terakhir di setiap grup.
+- **Status:** ✅ Selesai
 
 ---
 
@@ -434,6 +457,10 @@ baik untuk action manual maupun saran LLM.
 | core/scanner | `missing_folder_reports_not_found` | Robustness |
 | core/scanner | `nested_dirs_summed` | Akurasi rekursif |
 | core/scanner | `format_bytes_units` | UI formatting |
+| core/scanner | `exclusions_are_skipped` | Verifikasi Whitelist |
+| core/duplicates | `find_duplicates_works` | Akurasi SHA-256 |
+| core/duplicates | `find_duplicates_skips_exclusions` | Verifikasi filter duplikat |
+| core/disk_map | `scan_drive_pruning_and_sorting` | Akurasi scan Disk Map |
 | core/classifier | `monitor_only_is_protected` | Docker tidak tersentuh |
 | core/classifier | `heavy_cache_is_auto_cleanable` | Skor urgensi |
 | core/classifier | `small_healthy_folder` | Tidak false-positive |
@@ -443,9 +470,12 @@ baik untuk action manual maupun saran LLM.
 | actions/cleaner | `nested_dirs_counted` | Akurasi |
 | actions/cleaner | `missing_path_errors` | Error handling |
 | actions/cleaner | `empty_folder_no_op` | Edge case |
+| actions/cleaner | `clean_file_works` | Akurasi clean file |
 | actions/archiver | `archive_then_undo_roundtrip` | **Reversibility** |
 | actions/archiver | `idempotent_skip_existing` | Safety |
 | actions/archiver | `missing_source_skipped` | Robustness |
+| actions/undo_cleaner | `clean_to_recycle_and_restore_roundtrip` | **Reversibility Recycle Bin** |
+| actions/undo_cleaner | `clean_to_recycle_and_purge` | Safety Recycle Bin |
 
 ### 10.2 Metrik keberhasilan produk
 
@@ -517,21 +547,17 @@ CARGO_HOME=/d/.cargo cargo build --release -p cache-advisor --features ai
 
 ### 12.2 In-progress
 
-- [ ] Wiring akhir API `llama-cpp-4` (load model → generate loop)
-  - Backend init: `LlamaBackend::init()`
-  - Load: `LlamaModel::load_from_file(&backend, path, &Default::default())`
-  - Context: `model.new_context(&backend, params)`
-  - Generate loop: tokenize → batch → decode → sample → detokenize
-- [ ] Panel Ask AI di `ui.rs` (feature-gated)
-
-### 12.3 Backlog (v0.3+)
-
-- [ ] Settings TOML (override folder, threshold, path model)
-- [ ] Deteksi duplikat (hash SHA-256, pre-filter by size)
-- [ ] README baru (setup model, prasyarat build, screenshot)
-- [ ] Scheduler scan periodik (opt-in, bukan resident berat)
-- [ ] Dukungan multi-drive (selain C ↔ E)
-- [ ] UI light/dark toggle, export laporan
+- [x] Wiring akhir API `llama-cpp-4` (load model → generate loop)
+- [x] Panel Ask AI di `ui.rs` (feature-gated)
+- [x] Settings TOML (override folder, threshold, path model)
+- [x] Deteksi duplikat (hash SHA-256, pre-filter by size)
+- [x] Scheduler scan periodik (opt-in, bukan resident berat)
+- [x] Dukungan multi-drive (selain C ↔ E)
+- [x] UI light/dark toggle, export laporan
+- [x] Disk Map (TreeMap Disk Visualizer)
+- [x] Undo Cleaner (Safe Recycle Bin & Restore)
+- [x] Whitelist / Exclusion List (Monitored Folders)
+- [x] Smart Selection & Bulk Deletion (Duplicate Files)
 
 ---
 
