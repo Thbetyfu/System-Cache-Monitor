@@ -39,9 +39,9 @@ pub struct ScanResult {
 }
 
 /// Scan a single folder rule. Never panics; missing folders return exists=false.
-pub fn scan_folder(rule: &FolderRule, stale_days: u32) -> ScanResult {
+pub fn scan_folder(rule: &FolderRule, stale_days: u32, exclusions: &[String]) -> ScanResult {
     let stats = if rule.path.exists() {
-        walk_stats(&rule.path, stale_days)
+        walk_stats(&rule.path, stale_days, exclusions)
     } else {
         FolderStats { exists: false, ..Default::default() }
     };
@@ -49,11 +49,11 @@ pub fn scan_folder(rule: &FolderRule, stale_days: u32) -> ScanResult {
 }
 
 /// Scan many rules in parallel (rayon thread pool).
-pub fn scan_all(rules: &[FolderRule], stale_days: u32) -> Vec<ScanResult> {
-    rules.par_iter().map(|r| scan_folder(r, stale_days)).collect()
+pub fn scan_all(rules: &[FolderRule], stale_days: u32, exclusions: &[String]) -> Vec<ScanResult> {
+    rules.par_iter().map(|r| scan_folder(r, stale_days, exclusions)).collect()
 }
 
-fn walk_stats(root: &Path, stale_days: u32) -> FolderStats {
+fn walk_stats(root: &Path, stale_days: u32, exclusions: &[String]) -> FolderStats {
     let total_bytes = AtomicU64::new(0);
     let file_count = AtomicU64::new(0);
     let largest_file = AtomicU64::new(0);
@@ -68,13 +68,21 @@ fn walk_stats(root: &Path, stale_days: u32) -> FolderStats {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
-    let entries: Vec<_> = match walkdir::WalkDir::new(root).into_iter().collect() {
-        // Collect first so rayon can iterate owned items in parallel.
-        v => v,
-    };
+    let entries: Vec<_> = walkdir::WalkDir::new(root)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let path_str = e.path().to_string_lossy().to_lowercase();
+            !exclusions.iter().any(|ex| {
+                let ex_low = ex.to_lowercase();
+                path_str == ex_low
+                    || path_str.starts_with(&format!("{}\\", ex_low))
+                    || path_str.starts_with(&format!("{}/", ex_low))
+            })
+        })
+        .collect();
 
-    entries.par_iter().for_each(|res| {
-        let Ok(entry) = res else { return };
+    entries.par_iter().for_each(|entry| {
         let Ok(ft) = entry.metadata() else { return };
         if !ft.is_file() {
             return;
@@ -189,7 +197,7 @@ mod tests {
         let dir = tmp("bytes");
         fs::write(dir.join("a.bin"), vec![0u8; 1024]).unwrap();
         fs::write(dir.join("b.bin"), vec![0u8; 2048]).unwrap();
-        let stats = walk_stats(&dir, 90);
+        let stats = walk_stats(&dir, 90, &[]);
         assert_eq!(stats.total_bytes, 1024 + 2048);
         assert_eq!(stats.file_count, 2);
         assert_eq!(stats.largest_file, 2048);
@@ -206,7 +214,7 @@ mod tests {
             note: None,
             archive_dest: None,
         };
-        let res = scan_folder(&rule, 90);
+        let res = scan_folder(&rule, 90, &[]);
         assert!(!res.stats.exists);
         assert_eq!(res.stats.total_bytes, 0);
     }
@@ -217,8 +225,23 @@ mod tests {
         fs::create_dir_all(dir.join("sub")).unwrap();
         fs::write(dir.join("top.txt"), b"hello").unwrap();
         fs::write(dir.join("sub").join("deep.txt"), b"world!").unwrap();
-        let stats = walk_stats(&dir, 90);
+        let stats = walk_stats(&dir, 90, &[]);
         assert_eq!(stats.total_bytes, (b"hello".len() + b"world!".len()) as u64);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn exclusions_are_skipped() {
+        let dir = tmp("exclusions");
+        fs::write(dir.join("a.bin"), vec![0u8; 1000]).unwrap();
+        fs::create_dir_all(dir.join("skip_me")).unwrap();
+        fs::write(dir.join("skip_me").join("b.bin"), vec![0u8; 2000]).unwrap();
+        
+        let exclusions = vec![dir.join("skip_me").to_string_lossy().to_string()];
+        let stats = walk_stats(&dir, 90, &exclusions);
+        
+        assert_eq!(stats.total_bytes, 1000);
+        assert_eq!(stats.file_count, 1);
         let _ = fs::remove_dir_all(&dir);
     }
 

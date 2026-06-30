@@ -25,7 +25,7 @@ pub struct DuplicateGroup {
 ///
 /// Files are matched based on exact size, then verified via SHA-256 hash.
 /// Empty files (0 bytes) are ignored.
-pub fn find_duplicates(directories: &[PathBuf]) -> Vec<DuplicateGroup> {
+pub fn find_duplicates(directories: &[PathBuf], exclusions: &[String]) -> Vec<DuplicateGroup> {
     let mut size_map: HashMap<u64, Vec<PathBuf>> = HashMap::new();
 
     // 1. Gather all files and map them by size
@@ -33,7 +33,21 @@ pub fn find_duplicates(directories: &[PathBuf]) -> Vec<DuplicateGroup> {
         if !dir.exists() {
             continue;
         }
-        for entry in walkdir::WalkDir::new(dir).into_iter().flatten() {
+        let entries: Vec<_> = walkdir::WalkDir::new(dir)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let path_str = e.path().to_string_lossy().to_lowercase();
+                !exclusions.iter().any(|ex| {
+                    let ex_low = ex.to_lowercase();
+                    path_str == ex_low
+                        || path_str.starts_with(&format!("{}\\", ex_low))
+                        || path_str.starts_with(&format!("{}/", ex_low))
+                })
+            })
+            .collect();
+
+        for entry in entries {
             let path = entry.path();
             if !path.is_file() {
                 continue;
@@ -122,12 +136,30 @@ mod tests {
         fs::write(&f2, "hello duplicate content").unwrap();
         fs::write(&f3, "unique content").unwrap();
 
-        let groups = find_duplicates(&[dir.clone()]);
+        let groups = find_duplicates(&[dir.clone()], &[]);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].file_size, f1.metadata().unwrap().len());
         assert_eq!(groups[0].file_paths.len(), 2);
         assert!(groups[0].file_paths.contains(&f1));
         assert!(groups[0].file_paths.contains(&f2));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_duplicates_skips_exclusions() {
+        let dir = tmp_dir("exclusions");
+
+        let f1 = dir.join("file1.txt");
+        let f2 = dir.join("file2.txt");
+
+        fs::write(&f1, "hello duplicate content").unwrap();
+        fs::write(&f2, "hello duplicate content").unwrap();
+
+        let exclusions = vec![f2.to_string_lossy().to_string()];
+        let groups = find_duplicates(&[dir.clone()], &exclusions);
+        
+        assert_eq!(groups.len(), 0);
 
         let _ = fs::remove_dir_all(&dir);
     }

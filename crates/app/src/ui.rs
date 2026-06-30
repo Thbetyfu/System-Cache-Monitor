@@ -8,7 +8,7 @@ use ca_core::{
     scanner::{format_bytes, scan_all, ScanResult},
 };
 use eframe::egui::{self, Color32, RichText};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use crate::tray::init_tray;
 
@@ -80,6 +80,7 @@ pub struct App {
 
     // Settings
     external_drive: String,
+    exclusion_input: String,
 
     // Recycle Bin (Undo Cleaner)
     recycle_root: PathBuf,
@@ -138,6 +139,7 @@ impl App {
             archive_result: None,
             archive_error: None,
             external_drive: "E:/".into(),
+            exclusion_input: String::new(),
 
             recycle_root: {
                 let p = std::env::temp_dir().join("cache_advisor_recycle_bin");
@@ -193,6 +195,7 @@ impl App {
     fn start_scan(&mut self, ctx: &egui::Context) {
         let folders = self.rules.folders.clone();
         let stale_days = self.settings.stale_days;
+        let exclusions = self.settings.exclusions.clone();
         self.scanning = true;
         self.last_clean = None;
         self.archive_result = None;
@@ -200,7 +203,7 @@ impl App {
         ctx.set_cursor_icon(egui::CursorIcon::Wait);
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let res = scan_all(&folders, stale_days);
+            let res = scan_all(&folders, stale_days, &exclusions);
             let _ = tx.send(res);
         });
         self.scan_rx = Some(rx);
@@ -605,6 +608,51 @@ impl App {
                         log::error!("Failed to purge clean session: {}", e);
                         self.archive_error = Some(format!("Failed to purge clean: {}", e));
                     }
+                }
+            }
+        });
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(8.0);
+
+        // Exclusion List / Whitelist Management
+        ui.collapsing("🛡 Monitored Folders Exclusion List (Whitelist)", |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Add Path to Exclude:");
+                ui.text_edit_singleline(&mut self.exclusion_input);
+                if ui.button("➕ Add").clicked() {
+                    let path_str = self.exclusion_input.trim().to_string();
+                    if !path_str.is_empty() && !self.settings.exclusions.contains(&path_str) {
+                        self.settings.exclusions.push(path_str);
+                        self.exclusion_input.clear();
+                        let _ = self.settings.save(Path::new("settings.toml"));
+                    }
+                }
+            });
+
+            ui.add_space(6.0);
+
+            if self.settings.exclusions.is_empty() {
+                ui.label("No folder or file paths excluded.");
+            } else {
+                let mut index_to_remove = None;
+                egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
+                    for (idx, exclusion) in self.settings.exclusions.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.label(exclusion);
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.button("❌ Remove").clicked() {
+                                    index_to_remove = Some(idx);
+                                }
+                            });
+                        });
+                    }
+                });
+
+                if let Some(idx) = index_to_remove {
+                    self.settings.exclusions.remove(idx);
+                    let _ = self.settings.save(Path::new("settings.toml"));
                 }
             }
         });
@@ -1041,12 +1089,13 @@ impl App {
     /// Spawn a thread to scan for duplicates.
     fn start_duplicates_scan(&mut self) {
         let directories: Vec<PathBuf> = self.rules.folders.iter().map(|f| f.path.clone()).collect();
+        let exclusions = self.settings.exclusions.clone();
         self.dup_scanning = true;
         self.duplicate_groups.clear();
 
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let res = ca_core::find_duplicates(&directories);
+            let res = ca_core::find_duplicates(&directories, &exclusions);
             let _ = tx.send(res);
         });
         self.dup_rx = Some(rx);

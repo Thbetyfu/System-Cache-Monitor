@@ -24,6 +24,10 @@ pub struct Settings {
 
     /// Optional list of folder rules to override the defaults.
     pub folders: Option<Vec<FolderRule>>,
+
+    /// Optional list of path substrings to exclude from scans.
+    #[serde(default)]
+    pub exclusions: Vec<String>,
 }
 
 /// LLM engine settings.
@@ -72,6 +76,7 @@ impl Default for Settings {
             llm: LlmSettings::default(),
             scheduler: SchedulerSettings::default(),
             folders: None,
+            exclusions: Vec::new(),
         }
     }
 }
@@ -90,6 +95,12 @@ impl Settings {
         } else {
             Settings::default()
         }
+    }
+
+    /// Save settings to a TOML file.
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        let text = toml::to_string_pretty(self).unwrap_or_default();
+        std::fs::write(path, text)
     }
 
     /// Resolve the RuleSet to use.
